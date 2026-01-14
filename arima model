@@ -158,4 +158,4 @@ plt.plot(test_data.index, test_data, label='Actual Test Data')
 plt.plot(test_data.index, pred, label=f'Predicted ARIMA{best_order}', color='orange')
 plt.title(f'Best ARIMA Model: {best_order}')
 plt.legend()
-plt.show()
+plt.show
