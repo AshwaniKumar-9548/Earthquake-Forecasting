@@ -1,0 +1,176 @@
+# ==============================================================
+# EARTHQUAKE PREDICTION PROJECT (California) - MCA DATA SCIENCE
+# ==============================================================
+
+# --- Importing Libraries ---
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import warnings
+warnings.filterwarnings("ignore")
+
+from statsmodels.tsa.arima.model import ARIMA
+from prophet import Prophet
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+import pmdarima as pm
+import statsmodels.api as sm
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+
+# ==============================================================
+# 1. Load and Inspect Data
+# ==============================================================
+
+df = pd.read_csv(r"C:\Users\akpan\Downloads\combined_eq_california_clean.csv")
+print(df.shape)
+print(df.columns)
+print(df.head())
+print(df.dtypes)
+
+# Column names
+dt_col = 'time'     # Date column
+mag_col = 'mag'     # Magnitude column
+
+# ==============================================================
+# 2. Convert Datetime and Clean Data
+# ==============================================================
+
+df[dt_col] = pd.to_datetime(df[dt_col], errors='coerce')
+df = df.dropna(subset=[dt_col, mag_col]).sort_values(dt_col)
+print(df.head())
+
+# ==============================================================
+# 3. Filter California Data
+# ==============================================================
+
+if 'place' in df.columns:
+    df_ca = df[df['place'].str.contains("California", case=False, na=False)].copy()
+else:
+    df_ca = df[(df['latitude'].between(32, 42)) & (df['longitude'].between(-125, -114))].copy()
+
+print(df.head())
+
+# ==============================================================
+# 4. Monthly Aggregation
+# ==============================================================
+
+df_ca['month'] = df_ca[dt_col].dt.to_period('M').dt.to_timestamp()
+
+monthly_mean_mag = df_ca.groupby('month')[mag_col].mean().rename("mean_mag")
+monthly_count = df_ca.groupby('month').size().rename("count")
+
+ts = pd.concat([monthly_mean_mag, monthly_count], axis=1)
+ts = ts.asfreq('MS')                  # Regular monthly frequency
+ts['mean_mag'] = ts['mean_mag'].interpolate()  # Fill missing months
+ts.head()
+
+# ==============================================================
+# 5. Data Visualization
+# ==============================================================
+
+plt.figure(figsize=(12, 4))
+plt.plot(ts.index, ts['mean_mag'])
+plt.title("California: Monthly Mean Magnitude")
+plt.xlabel("Date")
+plt.ylabel("Mean Magnitude")
+plt.show()
+
+plt.figure(figsize=(12, 4))
+plt.plot(ts.index, ts['count'])
+plt.title("California: Monthly Earthquake Counts")
+plt.xlabel("Date")
+plt.ylabel("Counts")
+plt.show()
+
+# ==============================================================
+# 6. Train-Test Split
+# ==============================================================
+
+if len(ts) >= 36:
+    TEST_MONTHS = 24
+else:
+    TEST_MONTHS = max(1, int(len(ts) * 0.2))
+
+train = ts.iloc[:-TEST_MONTHS]
+test  = ts.iloc[-TEST_MONTHS:]
+print("Train months:", len(train), "Test months:", len(test))
+
+# ==============================================================
+# 9. LSTM MODEL
+# ==============================================================
+
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+print("TensorFlow Version:", tf.__version__)
+
+# --- Prepare Data ---
+series = ts['mean_mag'].values.reshape(-1, 1)
+scaler = MinMaxScaler()
+scaled = scaler.fit_transform(series).flatten()
+
+SEQ_LEN = 12  # use 12 months (1 year) as input sequence
+X, y = [], []
+
+for i in range(len(scaled) - SEQ_LEN):
+    X.append(scaled[i:i + SEQ_LEN])
+    y.append(scaled[i + SEQ_LEN])
+
+X, y = np.array(X), np.array(y)
+
+# --- Train-Test Split ---
+train_size = len(train) - SEQ_LEN
+X_train, y_train = X[:train_size], y[:train_size]
+X_test, y_test   = X[train_size:train_size + len(test)], y[train_size:train_size + len(test)]
+
+# --- Reshape for LSTM [samples, timesteps, features] ---
+X_train = X_train.reshape((X_train.shape[0], SEQ_LEN, 1))
+X_test  = X_test.reshape((X_test.shape[0], SEQ_LEN, 1))
+
+# --- Build Model ---
+model = Sequential([
+    LSTM(64, activation='tanh', input_shape=(SEQ_LEN, 1)),
+    Dense(1)
+])
+
+# --- Compile and Train ---
+model.compile(optimizer='adam', loss='mse')
+history = model.fit(
+    X_train, y_train,
+    epochs=40,
+    batch_size=8,
+    validation_data=(X_test, y_test),
+    verbose=1
+)
+
+# --- Predictions ---
+y_pred_scaled = model.predict(X_test).flatten()
+y_pred = scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
+
+# --- Convert to Series ---
+lstm_pred = pd.Series(y_pred, index=test.index, name='lstm_pred')
+
+# --- Evaluation ---
+mse_lstm = mean_squared_error(test['mean_mag'], lstm_pred)
+rmse_lstm = np.sqrt(mse_lstm)
+
+print(f"\nLSTM Model Evaluation:")
+print(f"MSE: {mse_lstm:.4f}")
+print(f"RMSE: {rmse_lstm:.4f}")
+
+# --- Plot ---
+plt.figure(figsize=(10,5))
+plt.plot(train.index, train['mean_mag'], label='Train Data')
+plt.plot(test.index, test['mean_mag'], label='Actual Test Data')
+plt.plot(test.index, lstm_pred, label='Predicted (LSTM)', color='red')
+plt.title('LSTM Model Forecast vs Actual')
+plt.legend()
+plt.grid(True)
+plt.show()

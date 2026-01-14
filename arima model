@@ -1,0 +1,161 @@
+# ==============================================================
+# EARTHQUAKE PREDICTION PROJECT (California) - MCA DATA SCIENCE
+# ==============================================================
+
+# --- Importing Libraries ---
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import warnings
+warnings.filterwarnings("ignore")
+
+from statsmodels.tsa.arima.model import ARIMA
+from prophet import Prophet
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+import pmdarima as pm
+import statsmodels.api as sm
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+
+# ==============================================================
+# 1. Load and Inspect Data
+# ==============================================================
+
+df = pd.read_csv(r"C:\Users\akpan\Downloads\combined_eq_california_clean.csv")
+print(df.shape)
+print(df.columns)
+print(df.head())
+print(df.dtypes)
+
+# Column names
+dt_col = 'time'     # Date column
+mag_col = 'mag'     # Magnitude column
+
+# ==============================================================
+# 2. Convert Datetime and Clean Data
+# ==============================================================
+
+df[dt_col] = pd.to_datetime(df[dt_col], errors='coerce')
+df = df.dropna(subset=[dt_col, mag_col]).sort_values(dt_col)
+print(df.head())
+
+# ==============================================================
+# 3. Filter California Data
+# ==============================================================
+
+if 'place' in df.columns:
+    df_ca = df[df['place'].str.contains("California", case=False, na=False)].copy()
+else:
+    df_ca = df[(df['latitude'].between(32, 42)) & (df['longitude'].between(-125, -114))].copy()
+
+print(df.head())
+
+# ==============================================================
+# 4. Monthly Aggregation
+# ==============================================================
+
+df_ca['month'] = df_ca[dt_col].dt.to_period('M').dt.to_timestamp()
+
+monthly_mean_mag = df_ca.groupby('month')[mag_col].mean().rename("mean_mag")
+monthly_count = df_ca.groupby('month').size().rename("count")
+
+ts = pd.concat([monthly_mean_mag, monthly_count], axis=1)
+ts = ts.asfreq('MS')                  # Regular monthly frequency
+ts['mean_mag'] = ts['mean_mag'].interpolate()  # Fill missing months
+ts.head()
+
+# ==============================================================
+# 5. Data Visualization
+# ==============================================================
+
+plt.figure(figsize=(12, 4))
+plt.plot(ts.index, ts['mean_mag'])
+plt.title("California: Monthly Mean Magnitude")
+plt.xlabel("Date")
+plt.ylabel("Mean Magnitude")
+plt.show()
+
+plt.figure(figsize=(12, 4))
+plt.plot(ts.index, ts['count'])
+plt.title("California: Monthly Earthquake Counts")
+plt.xlabel("Date")
+plt.ylabel("Counts")
+plt.show()
+
+# ==============================================================
+# 6. Train-Test Split
+# ==============================================================
+
+if len(ts) >= 36:
+    TEST_MONTHS = 24
+else:
+    TEST_MONTHS = max(1, int(len(ts) * 0.2))
+
+train = ts.iloc[:-TEST_MONTHS]
+test  = ts.iloc[-TEST_MONTHS:]
+print("Train months:", len(train), "Test months:", len(test))
+
+# ==============================================================
+# 7. ARIMA MODEL (Grid Search for Best Order)
+# ==============================================================
+
+import warnings
+warnings.filterwarnings("ignore")
+
+import itertools
+import pandas as pd
+import numpy as np
+from statsmodels.tsa.arima.model import ARIMA
+from sklearn.metrics import mean_squared_error
+
+# --- Train and Test Data ---
+train_data = train['mean_mag']
+test_data = test['mean_mag']
+
+# --- Define p, d, q range ---
+p = d = q = range(0, 4)  # 0, 1, 2, 3
+pdq = list(itertools.product(p, d, q))
+
+best_aic = np.inf
+best_order = None
+best_model = None
+
+print("🔍 Testing different (p,d,q) combinations...\n")
+
+# --- Grid Search for Best ARIMA ---
+for order in pdq:
+    try:
+        model = ARIMA(train_data, order=order)
+        fit = model.fit()
+        if fit.aic < best_aic:
+            best_aic = fit.aic
+            best_order = order
+            best_model = fit
+        print(f"ARIMA{order} → AIC: {fit.aic:.4f}")
+    except:
+        continue
+
+print("\n✅ Best ARIMA order:", best_order)
+print(f"Lowest AIC: {best_aic:.4f}")
+
+# --- Forecast ---
+fc = best_model.get_forecast(steps=len(test_data))
+pred = fc.predicted_mean
+
+# --- Evaluation ---
+mse = mean_squared_error(test_data, pred)
+rmse = np.sqrt(mse)
+
+print(f"\nMSE: {mse:.4f}")
+print(f"RMSE: {rmse:.4f}")
+
+# --- Plot Results ---
+import matplotlib.pyplot as plt
+plt.figure(figsize=(10,5))
+plt.plot(train_data, label='Train Data')
+plt.plot(test_data.index, test_data, label='Actual Test Data')
+plt.plot(test_data.index, pred, label=f'Predicted ARIMA{best_order}', color='orange')
+plt.title(f'Best ARIMA Model: {best_order}')
+plt.legend()
+plt.show()

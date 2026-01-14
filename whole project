@@ -1,0 +1,400 @@
+# ==============================================================
+# EARTHQUAKE PREDICTION PROJECT (California) - MCA DATA SCIENCE
+# ==============================================================
+
+# --- Importing Libraries ---
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import warnings
+warnings.filterwarnings("ignore")
+
+from statsmodels.tsa.arima.model import ARIMA
+from prophet import Prophet
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+import pmdarima as pm
+import statsmodels.api as sm
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+
+# ==============================================================
+# 1. Load and Inspect Data
+# ==============================================================
+
+df = pd.read_csv(r"C:\Users\akpan\Downloads\combined_eq_california_clean.csv")
+print(df.shape)
+print(df.columns)
+print(df.head())
+print(df.dtypes)
+
+# Column names
+dt_col = 'time'     # Date column
+mag_col = 'mag'     # Magnitude column
+
+# ==============================================================
+# 2. Convert Datetime and Clean Data
+# ==============================================================
+
+df[dt_col] = pd.to_datetime(df[dt_col], errors='coerce')
+df = df.dropna(subset=[dt_col, mag_col]).sort_values(dt_col)
+print(df.head())
+
+# ==============================================================
+# 3. Filter California Data
+# ==============================================================
+
+if 'place' in df.columns:
+    df_ca = df[df['place'].str.contains("California", case=False, na=False)].copy()
+else:
+    df_ca = df[(df['latitude'].between(32, 42)) & (df['longitude'].between(-125, -114))].copy()
+
+print(df.head())
+
+# ==============================================================
+# 4. Monthly Aggregation
+# ==============================================================
+
+df_ca['month'] = df_ca[dt_col].dt.to_period('M').dt.to_timestamp()
+
+monthly_mean_mag = df_ca.groupby('month')[mag_col].mean().rename("mean_mag")
+monthly_count = df_ca.groupby('month').size().rename("count")
+
+ts = pd.concat([monthly_mean_mag, monthly_count], axis=1)
+ts = ts.asfreq('MS')                  # Regular monthly frequency
+ts['mean_mag'] = ts['mean_mag'].interpolate()  # Fill missing months
+ts.head()
+
+# ==============================================================
+# 5. Data Visualization
+# ==============================================================
+
+plt.figure(figsize=(12, 4))
+plt.plot(ts.index, ts['mean_mag'])
+plt.title("California: Monthly Mean Magnitude")
+plt.xlabel("Date")
+plt.ylabel("Mean Magnitude")
+plt.show()
+
+plt.figure(figsize=(12, 4))
+plt.plot(ts.index, ts['count'])
+plt.title("California: Monthly Earthquake Counts")
+plt.xlabel("Date")
+plt.ylabel("Counts")
+plt.show()
+
+# ==============================================================
+# 6. Train-Test Split
+# ==============================================================
+
+if len(ts) >= 36:
+    TEST_MONTHS = 24
+else:
+    TEST_MONTHS = max(1, int(len(ts) * 0.2))
+
+train = ts.iloc[:-TEST_MONTHS]
+test  = ts.iloc[-TEST_MONTHS:]
+print("Train months:", len(train), "Test months:", len(test))
+
+# ==============================================================
+# 7. ARIMA MODEL (Grid Search for Best Order)
+# ==============================================================
+
+import itertools
+best_aic = np.inf
+best_order = None
+best_model = None
+
+p = d = q = range(0, 4)  # Try 0, 1, 2, 3 for p, d, q
+pdq = list(itertools.product(p, d, q))
+
+print("🔍 Testing ARIMA models with different (p,d,q) combinations...\n")
+
+for order in pdq:
+    try:
+        model = ARIMA(train['mean_mag'], order=order)
+        fit = model.fit()
+        if fit.aic < best_aic:
+            best_aic = fit.aic
+            best_order = order
+            best_model = fit
+        print(f"ARIMA{order} → AIC: {fit.aic:.4f}")
+    except:
+        continue
+
+print("\n✅ Best ARIMA order selected:", best_order)
+print(f"Lowest AIC: {best_aic:.4f}")
+
+# --- Forecast using Best ARIMA ---
+fc = best_model.get_forecast(steps=len(test))
+arima_pred = fc.predicted_mean
+
+# --- Evaluation for ARIMA ---
+from sklearn.metrics import mean_squared_error
+import numpy as np
+
+mse = mean_squared_error(test['mean_mag'], arima_pred)
+rmse = np.sqrt(mse)
+
+print(f"\nARIMA Model Evaluation:")
+print(f"MSE: {mse:.4f}")
+print(f"RMSE: {rmse:.4f}")
+
+# --- Plot Best ARIMA Forecast ---
+plt.figure(figsize=(10,5))
+plt.plot(train['mean_mag'], label='Train Data')
+plt.plot(test.index, test['mean_mag'], label='Actual Test Data')
+plt.plot(test.index, arima_pred, label=f'Predicted (ARIMA{best_order})', color='orange')
+plt.title(f'Best ARIMA Model: {best_order}')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# ==============================================================
+# 8. PROPHET MODEL
+# ==============================================================
+
+
+from prophet import Prophet
+from sklearn.metrics import mean_squared_error
+import numpy as np
+
+# --- Prepare Data for Prophet ---
+prophet_df = train['mean_mag'].reset_index().rename(columns={'month':'ds', 'mean_mag':'y'})
+
+# --- Initialize and Fit Model ---
+m = Prophet(yearly_seasonality=True)
+m.fit(prophet_df)
+
+# --- Create Future DataFrame ---
+future = m.make_future_dataframe(periods=len(test), freq='MS')
+
+# --- Generate Forecast ---
+forecast = m.predict(future)
+
+# --- Extract Predictions for Test Period ---
+prophet_pred = forecast.set_index('ds')['yhat'].loc[test.index]
+
+# --- Evaluation ---
+mse_prophet = mean_squared_error(test['mean_mag'], prophet_pred)
+rmse_prophet = np.sqrt(mse_prophet)
+
+print(f"\nPROPHET Model Evaluation:")
+print(f"MSE: {mse_prophet:.4f}")
+print(f"RMSE: {rmse_prophet:.4f}")
+
+# --- Plot Results ---
+plt.figure(figsize=(10,5))
+plt.plot(train.index, train['mean_mag'], label='Train Data')
+plt.plot(test.index, test['mean_mag'], label='Actual Test Data')
+plt.plot(test.index, prophet_pred, label='Predicted (Prophet)', color='green')
+plt.title('Prophet Model Forecast vs Actual')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+
+# ==============================================================
+# 9. LSTM MODEL
+# ==============================================================
+
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+print("TensorFlow Version:", tf.__version__)
+
+# --- Prepare Data ---
+series = ts['mean_mag'].values.reshape(-1, 1)
+scaler = MinMaxScaler()
+scaled = scaler.fit_transform(series).flatten()
+
+SEQ_LEN = 12  # use 12 months (1 year) as input sequence
+X, y = [], []
+
+for i in range(len(scaled) - SEQ_LEN):
+    X.append(scaled[i:i + SEQ_LEN])
+    y.append(scaled[i + SEQ_LEN])
+
+X, y = np.array(X), np.array(y)
+
+# --- Train-Test Split ---
+train_size = len(train) - SEQ_LEN
+X_train, y_train = X[:train_size], y[:train_size]
+X_test, y_test   = X[train_size:train_size + len(test)], y[train_size:train_size + len(test)]
+
+# --- Reshape for LSTM [samples, timesteps, features] ---
+X_train = X_train.reshape((X_train.shape[0], SEQ_LEN, 1))
+X_test  = X_test.reshape((X_test.shape[0], SEQ_LEN, 1))
+
+# --- Build Model ---
+model = Sequential([
+    LSTM(64, activation='tanh', input_shape=(SEQ_LEN, 1)),
+    Dense(1)
+])
+
+# --- Compile and Train ---
+model.compile(optimizer='adam', loss='mse')
+history = model.fit(
+    X_train, y_train,
+    epochs=40,
+    batch_size=8,
+    validation_data=(X_test, y_test),
+    verbose=1
+)
+
+# --- Predictions ---
+y_pred_scaled = model.predict(X_test).flatten()
+y_pred = scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
+
+# --- Convert to Series ---
+lstm_pred = pd.Series(y_pred, index=test.index, name='lstm_pred')
+
+# --- Evaluation ---
+mse_lstm = mean_squared_error(test['mean_mag'], lstm_pred)
+rmse_lstm = np.sqrt(mse_lstm)
+
+print(f"\nLSTM Model Evaluation:")
+print(f"MSE: {mse_lstm:.4f}")
+print(f"RMSE: {rmse_lstm:.4f}")
+
+# --- Plot ---
+plt.figure(figsize=(10,5))
+plt.plot(train.index, train['mean_mag'], label='Train Data')
+plt.plot(test.index, test['mean_mag'], label='Actual Test Data')
+plt.plot(test.index, lstm_pred, label='Predicted (LSTM)', color='red')
+plt.title('LSTM Model Forecast vs Actual')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# ==============================================================
+# 10. AUTO ARIMA (seasonal)
+# ==============================================================
+
+import pmdarima as pm
+from sklearn.metrics import mean_squared_error
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+
+# --- Fit Auto ARIMA Model ---
+smodel = pm.auto_arima(
+    train['mean_mag'].dropna(),
+    seasonal=True, m=12,
+    start_p=0, start_q=0, max_p=5, max_q=5,
+    start_P=0, start_Q=0, max_P=2, max_Q=2,
+    trace=True, error_action='ignore', suppress_warnings=True
+)
+
+print("\nBest Model Summary:")
+print(smodel.summary())
+
+# --- Forecast ---
+n_steps = len(test)
+arima_fc = smodel.predict(n_periods=n_steps)
+arima_index = test.index[:n_steps]
+auto_arima_pred = pd.Series(arima_fc, index=arima_index, name='auto_arima_pred')
+
+# --- Evaluation Metrics ---
+mse_auto = mean_squared_error(test['mean_mag'], auto_arima_pred)
+rmse_auto = np.sqrt(mse_auto)
+
+print(f"\nAuto ARIMA Evaluation:")
+print(f"MSE: {mse_auto:.4f}")
+print(f"RMSE: {rmse_auto:.4f}")
+
+# --- Plot Forecast vs Actual ---
+plt.figure(figsize=(12, 6))
+plt.plot(train.index, train['mean_mag'], label='Training Data', color='blue')
+plt.plot(test.index, test['mean_mag'], label='Actual Test Data', color='black', marker='o')
+plt.plot(auto_arima_pred.index, auto_arima_pred.values, label='Auto ARIMA Prediction', color='red', marker='x')
+
+plt.title('Auto ARIMA Forecast vs Actual')
+plt.xlabel('Date')
+plt.ylabel('Mean Magnitude')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# ==============================================================
+# 11. VISUALIZATION OF ALL MODELS
+# ==============================================================
+
+predictions = {
+    'ARIMA': arima_pred,
+    'Auto ARIMA': auto_arima_pred,
+    'Prophet': prophet_pred,
+    'LSTM': lstm_pred
+}
+
+plt.figure(figsize=(12, 6))
+plt.plot(test['mean_mag'], label='Actual', marker='o')
+
+for name, pred in predictions.items():
+    plt.plot(pred, label=name, marker='x')
+
+plt.title("Forecast vs Actual (All Models)")
+plt.xlabel("Date")
+plt.ylabel("Mean Magnitude")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# ==============================================================
+# 12. EVALUATION METRICS (MSE, RMSE & MAE)
+# ==============================================================
+
+errors = {}
+
+for name, pred in predictions.items():
+    mse = mean_squared_error(test['mean_mag'], pred)
+    rmse = np.sqrt(mse)
+    mae = mean_absolute_error(test['mean_mag'], pred)
+
+    errors[name] = {'MSE': mse, 'RMSE': rmse, 'MAE': mae}
+
+    print(f"{name} - MSE: {mse:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}")
+
+# ==============================================================
+# 13. COMBINED PLOT WITH ERROR BARS
+# ==============================================================
+
+plt.figure(figsize=(14, 7))
+plt.plot(test.index, test['mean_mag'], label='Actual', color='black', linewidth=2, marker='o')
+
+colors = ['blue', 'green', 'red', 'purple']
+for i, (name, pred) in enumerate(predictions.items()):
+    mse = errors[name]['MSE']
+    rmse = errors[name]['RMSE']
+    plt.plot(pred.index, pred.values, label=f"{name} (RMSE={rmse:.2f})", color=colors[i], marker='x')
+    plt.fill_between(pred.index, pred.values - rmse, pred.values + rmse, color=colors[i], alpha=0.2)
+
+plt.title("Forecast vs Actual with Error Bars (RMSE)")
+plt.xlabel("Date")
+plt.ylabel("Mean Magnitude")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# ==============================================================
+# 14. Model Error Comparison Bar Chart
+# ==============================================================
+
+import seaborn as sns
+
+# Convert error dictionary to DataFrame
+error_df = pd.DataFrame(errors).T
+
+plt.figure(figsize=(8,5))
+error_df[['RMSE', 'MAE']].plot(kind='bar', figsize=(10,6), colormap='viridis')
+plt.title("Model Performance Comparison (RMSE & MAE)")
+plt.ylabel("Error Value")
+plt.xticks(rotation=0)
+plt.grid(True, linestyle='--', alpha=0.7)
+plt.show()
